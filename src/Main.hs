@@ -204,10 +204,10 @@ parseInt = do
   digs <- many parseDig
   return $ foldl (\a b -> a * 10 + b) dig digs
 
-parseSpace :: StateT String (Either String) ()
-parseSpace = do
+parseWhiteSpace :: StateT String (Either String) ()
+parseWhiteSpace = do
   dig <- parseToken
-  guard (dig == ' ')
+  guard (dig <= ' ')
   return ()
 
 intActions :: KeyActions
@@ -220,7 +220,7 @@ intActions =
   KeyActions
     gen
     (\k -> ReaderT (flip hPrint k))
-    (many parseSpace *> parseInt)
+    (many parseWhiteSpace *> parseInt <* many parseWhiteSpace)
 
 readA :: (Eq a) => a -> ReaderT a Maybe a
 readA val = do
@@ -230,33 +230,53 @@ readA val = do
 
 performEncryption :: (Monad m) =>
                      (enc -> m ()) ->
+                     (dec -> m ()) ->
                      (m dec) ->
+                     (m enc) ->
                      CompPair (KeyActions m m m) Encryptor k dec enc ->
-                     m ()
-performEncryption consumeEnc dec (CompPair ka encryptor) = do
-  key <- generate ka
-  dec <- dec
-  consumeEnc . encrypt encryptor key $ dec
+                     (m (), m ())
+performEncryption consumeEnc consumeDec dec enc (CompPair ka encryptor) =
+  (performEnc, performDec) where
+  performEnc = do
+    key <- generate ka
+    save ka key
+    dec <- dec
+    consumeEnc . encrypt encryptor key $ dec
+  performDec = do
+    key <- load ka
+    enc <- enc
+    consumeDec . decrypt encryptor key $ enc
 
 main :: IO ()
-main = performEncryption writeEnc dec alg where
-  alg = (CompPair (mapGenerate fromGen .
-                   mapSave fromSave .
-                   mapLoad fromLoad $
-                   intActions)
-          shiftUp)
-  dec = requestFileToReadDecrypted >>= hGetContents
-  enc = requestFileToReadEncrypted >>= hGetContents
+main = do
+  putStrLn "please enter operation (encryption|decryption)"
+  operation <- getLine
+  let (encryption,decryption) = performEncryption writeEnc writeDec dec enc alg
+  case operation of
+    "encryption" -> encryption
+    "decryption" -> decryption
+    _ -> do
+      putStrLn $ "did not understand operation " ++ show operation
+      main
+      
+  where
+    alg = (CompPair (mapGenerate fromGen .
+                     mapSave fromSave .
+                     mapLoad fromLoad $
+                     intActions)
+           shiftUp)
+    dec = requestFileToReadDecrypted >>= hGetContents
+    enc = requestFileToReadEncrypted >>= hGetContents
 
 fromGen :: State StdGen a -> IO a
 fromGen gen = pure $ evalState gen (mkStdGen 137)
 
 fromSave :: ReaderT Handle IO () -> IO ()
-fromSave saving = writeHandleFromUser >>= runReaderT saving
+fromSave saving = userKeyWriteHandle >>= runReaderT saving
 
 fromLoad :: StateT String (Either String) k -> IO k
 fromLoad loading = do
-  h <- readHandleFromUser
+  h <- userKeyReadHandle
   str <- hGetContents h
   either fail
     parsedToIO
@@ -270,9 +290,15 @@ writeEnc enc = do
   fh <- requestFileToWriteEncrypted
   hPutStr fh enc
 
-requestFileToWriteEncrypted :: IO Handle
-requestFileToWriteEncrypted = do
-  putStrLn "please enter a path for the encrypted file to be saved at"
+writeDec :: String -> IO ()
+writeDec enc = do
+  fh <- requestFileToWriteDecrypted
+  hPutStr fh enc
+
+requestFileToWrite :: String -> IO Handle
+requestFileToWrite fileType = do
+  putStrLn $ "please enter a path for the " ++ fileType ++
+             " file to be saved at"
   path <- getLine
   fh <- try $ openFile path WriteMode
   case fh of
@@ -282,6 +308,14 @@ requestFileToWriteEncrypted = do
       putStrLn $ "because: " ++ show (e :: IOException)
       requestFileToWriteEncrypted
     Right fh -> return fh
+
+requestFileToWriteEncrypted :: IO Handle
+requestFileToWriteEncrypted = requestFileToWrite "encrypted"
+
+requestFileToWriteDecrypted :: IO Handle
+requestFileToWriteDecrypted = requestFileToWrite "decrypted"
+
+
 
 requestFileToReadDecrypted :: IO Handle
 requestFileToReadDecrypted = requestFileToRead "decrypted"
@@ -304,8 +338,15 @@ requestFileToRead fileType = do
       requestFileToReadDecrypted
     Right fh -> return fh
 
-writeHandleFromUser = openFile "key.txt" WriteMode
-readHandleFromUser = openFile "key.txt" ReadMode
+userKeyWriteHandle = do
+  putStrLn "please enter a key path to write into"
+  path <- getLine
+  openFile path WriteMode
+
+userKeyReadHandle = do
+  putStrLn "please encter a key path to read from"
+  path <- getLine
+  openFile path ReadMode
 
 
   
