@@ -219,50 +219,73 @@ performEncryption fromGen fromSave fromLoad consumeEnc
                   dec
                   (CompPair ka encryptor) = do
   key <- fromGen (generate ka)
-  consumeEnc . encrypt encryptor key =<< dec
+  dec <- dec
+  consumeEnc . encrypt encryptor key $ dec
 
 main :: IO ()
 main = performEncryption
-         fromGen fromSave fromLoad consumeEnc
+         fromGen fromSave fromLoad writeEnc
          dec
          alg where
-  fromGen gen = pure $ evalState gen (mkStdGen 137)
-  fromSave saving = writeHandleFromUser >>= runReaderT saving
-  fromLoad loading = do h <- readHandleFromUser
-                        str <- hGetContents h
-                        either fail parsedToIO (runStateT loading str)
-  parsedToIO (r, "") = return r
-  parsedToIO (r, remains) = fail ("got remains after key parse: " ++ show remains)
-  consumeEnc enc = do
-    fh <- requestFileToWriteEncrypted
-    hPutStr fh enc
-  requestFileToWriteEncrypted :: IO Handle
-  requestFileToWriteEncrypted = do
-    putStrLn "please enter a path for the encrypted file to be saved at"
-    path <- getLine
-    fh <- try $ openFile path WriteMode
-    case fh of
-      Left e -> do
-        putStrLn $ "could not open a file handle for writing into " ++
-                   show path
-        putStrLn $ "because: " ++ show (e :: IOException)
-        requestFileToWriteEncrypted
-      Right fh -> return fh
-  requestFileToReadDecrypted :: IO Handle
-  requestFileToReadDecrypted = do
-    putStrLn $ "please enter a path for the decrypted file to be loaded from" ++
-               " for encryption"
-    path <- getLine
-    fh <- try $ openFile path ReadMode
-    case fh of
-      Left e -> do
-        putStrLn $ "could not open a file handle for reading from " ++
-                   show path
-        putStrLn $ "because: " ++ show (e :: IOException)
-        requestFileToReadDecrypted
-      Right fh -> return fh
   alg = (CompPair intActions shiftUp)
   dec = requestFileToReadDecrypted >>= hGetContents
+  enc = requestFileToReadEncrypted >>= hGetContents
+
+fromGen :: State StdGen a -> IO a
+fromGen gen = pure $ evalState gen (mkStdGen 137)
+
+fromSave :: ReaderT Handle IO () -> IO ()
+fromSave saving = writeHandleFromUser >>= runReaderT saving
+
+fromLoad :: StateT String (Either String) k -> IO k
+fromLoad loading = do
+  h <- readHandleFromUser
+  str <- hGetContents h
+  either fail
+    parsedToIO
+    (runStateT loading str)
+  where
+    parsedToIO (r, "") = return r
+    parsedToIO (r, remains) = fail ("got remains after key parse: " ++ show remains)
+
+writeEnc :: String -> IO ()
+writeEnc enc = do
+  fh <- requestFileToWriteEncrypted
+  hPutStr fh enc
+
+requestFileToWriteEncrypted :: IO Handle
+requestFileToWriteEncrypted = do
+  putStrLn "please enter a path for the encrypted file to be saved at"
+  path <- getLine
+  fh <- try $ openFile path WriteMode
+  case fh of
+    Left e -> do
+      putStrLn $ "could not open a file handle for writing into " ++
+                 show path
+      putStrLn $ "because: " ++ show (e :: IOException)
+      requestFileToWriteEncrypted
+    Right fh -> return fh
+
+requestFileToReadDecrypted :: IO Handle
+requestFileToReadDecrypted = requestFileToRead "decrypted"
+
+requestFileToReadEncrypted :: IO Handle
+requestFileToReadEncrypted = requestFileToRead "encrypted"
+
+requestFileToRead :: String -> IO Handle
+requestFileToRead fileType = do
+  putStrLn $ "please enter a path for the " ++ fileType ++
+             " file to be loaded from" ++
+             " for encryption"
+  path <- getLine
+  fh <- try $ openFile path ReadMode
+  case fh of
+    Left e -> do
+      putStrLn $ "could not open a file handle for reading from " ++
+                 show path
+      putStrLn $ "because: " ++ show (e :: IOException)
+      requestFileToReadDecrypted
+    Right fh -> return fh
 
 writeHandleFromUser = openFile "key.txt" WriteMode
 readHandleFromUser = openFile "key.txt" ReadMode
