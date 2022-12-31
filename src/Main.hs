@@ -1,11 +1,14 @@
 import Data.Char (ord, chr)
 import Data.Bits (xor)
 import Data.Function (on)
+import Data.Foldable
+import Prelude hiding (repeat)
 import Control.Monad
 import Control.Monad.State (state, State)
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Applicative
+import Control.Exception
 import System.Random
 import System.IO
 import Pipes
@@ -21,13 +24,21 @@ data Encryptor k dec enc =
   Encryptor { encrypt :: k -> dec -> enc
             , decrypt :: k -> enc -> dec }
 
+data KeyActions g s l k dec enc =
+  KeyActions { generate :: g k
+             , save :: k -> s ()
+             , load :: l k }
+
+data CompPair kc1 kc2 k dec enc =
+  CompPair (kc1 k dec enc) (kc2 k dec enc)
+
 instance KeyComposed Encryptor where
   strongCompose encryptor1 encryptor2 =
-    Encryptor { encrypt = \(k1,k2) -> encrypt encryptor1 k1 . encrypt encryptor2 k2
-              , decrypt = \(k1,k2) -> decrypt encryptor2 k2 . decrypt encryptor1 k1 }
+    Encryptor (\(k1,k2) -> encrypt encryptor1 k1 . encrypt encryptor2 k2)
+              (\(k1,k2) -> decrypt encryptor2 k2 . decrypt encryptor1 k1)
   compose encryptor1 encryptor2 =
-    Encryptor { encrypt = \k -> encrypt encryptor1 k . encrypt encryptor2 k
-              , decrypt = \k -> decrypt encryptor2 k . decrypt encryptor1 k }
+    Encryptor (\k -> encrypt encryptor1 k . encrypt encryptor2 k)
+              (\k -> decrypt encryptor2 k . decrypt encryptor1 k)
   identity = Encryptor (const id) (const id)
   strongRepeat n encryptor =
     foldr strCompose (liftKey (const ()) identity) $ replicate n encryptor
@@ -36,9 +47,6 @@ instance KeyComposed Encryptor where
         liftKey (\(x:xs) -> (x,xs)) $ strongCompose encryptor1 encryptor2
   repeat n encryptor =
     foldr compose (liftKey (const ()) identity) (replicate n encryptor)
-
-data CompPair kc1 kc2 k dec enc =
-  CompPair (kc1 k dec enc) (kc2 k dec enc)
 
 instance (Applicative g, Applicative s, Applicative l) =>
          KeyComposed (KeyActions g s l) where
@@ -57,24 +65,37 @@ instance (Applicative g, Applicative s, Applicative l) =>
       (pure ())
       (const $ pure ())
       (pure ())
-  strongRepeat n = _1
-  repeat n = _
+  strongRepeat n ka =
+    KeyActions
+      (replicateM n (generate ka))
+      (traverse_ (save ka))
+      (replicateM n (load ka))
+  repeat = flip const
 
 instance (KeyComposed a, KeyComposed b) => KeyComposed (CompPair a b) where
   strongCompose (CompPair enc1 ka1) (CompPair enc2 ka2) =
-    CompPair (strongCompose enc1 enc2) (strongCompose ka1 ka2)
-  compose (CompPair enc1 ka1) (CompPair enc2 ka2) =
-    CompPair (compose enc1 enc2) (compose ka1 ka2)
+    CompPair (strongCompose enc1 enc2)
+             (strongCompose ka1 ka2)
+  compose (CompPair enc1 ka1)
+          (CompPair enc2 ka2) =
+    CompPair (compose enc1 enc2)
+             (compose ka1 ka2)
   identity = CompPair identity identity
-  
+  strongRepeat n (CompPair a b) =
+    CompPair (strongRepeat n a)
+             (strongRepeat n b)
+  repeat n (CompPair a b) =
+    CompPair (repeat n a)
+             (repeat n b)
+
 liftKey :: (k1 -> k2) -> Encryptor k2 a b -> Encryptor k1 a b
 liftKey k1ToK2 encryptor =
-  Encryptor { encrypt = encrypt encryptor . k1ToK2
-            , decrypt = decrypt encryptor . k1ToK2 }
+  Encryptor (encrypt encryptor . k1ToK2)
+            (decrypt encryptor . k1ToK2)
 
 operationAndKeyReverseEncryptor :: (k -> a -> a) -> (k -> k) -> Encryptor k a a
 operationAndKeyReverseEncryptor op kRev =
-  Encryptor { encrypt = op , decrypt = op . kRev }
+  Encryptor op (op . kRev)
 
 intCharOpFrom :: (Int -> Int -> Int) -> Int -> Char -> Char
 intCharOpFrom op n c = chr $ mod (n `op` ord c) (ord maxBound + 1)
@@ -117,12 +138,6 @@ shiftMult = shift multEncryptor
 shiftXor :: Encryptor Int String String
 shiftXor = shift xorEncryptor
 
--------------------------------------------------
-
-data KeyActions g s l k dec enc =
-  KeyActions { generate :: g k
-             , save :: k -> s ()
-             , load :: l k }
 
 gen :: (Random a, RandomGen g) => State g a
 gen = state random
@@ -139,9 +154,6 @@ fileWriter fh = do
   c <- await
   lift . hPutChar fh $ c
   fileWriter fh
-
-saveShow :: Show s => s -> Producer Char IO ()
-saveShow = each . show
 
 parseToken :: StateT [token] (Either String) token
 parseToken = StateT (\tokens ->
@@ -179,14 +191,14 @@ parseSpace = do
 
 intActions :: KeyActions
                 (State StdGen)
-                (Producer Char IO)
+                (ReaderT Handle IO)
                 (StateT String (Either String))
                 Int
                 dec enc
 intActions =
   KeyActions
     gen
-    saveShow
+    (\k -> ReaderT (flip hPrint k))
     (many parseSpace *> parseInt)
 
 readA :: (Eq a) => a -> ReaderT a Maybe a
@@ -195,6 +207,68 @@ readA val = do
   guard (a == val)
   return val
 
+performEncryption :: (Monad m) =>
+                     (g k -> m k) ->
+                     (s () -> m ()) ->
+                     (l k -> m k) ->
+                     (enc -> m ()) ->
+                     (m dec) ->
+                     CompPair (KeyActions g s l) Encryptor k dec enc ->
+                     m ()
+performEncryption fromGen fromSave fromLoad consumeEnc
+                  dec
+                  (CompPair ka encryptor) = do
+  key <- fromGen (generate ka)
+  consumeEnc . encrypt encryptor key =<< dec
+
+main :: IO ()
+main = performEncryption
+         fromGen fromSave fromLoad consumeEnc
+         dec
+         alg where
+  fromGen gen = pure $ evalState gen (mkStdGen 137)
+  fromSave saving = writeHandleFromUser >>= runReaderT saving
+  fromLoad loading = do h <- readHandleFromUser
+                        str <- hGetContents h
+                        either fail parsedToIO (runStateT loading str)
+  parsedToIO (r, "") = return r
+  parsedToIO (r, remains) = fail ("got remains after key parse: " ++ show remains)
+  consumeEnc enc = do
+    fh <- requestFileToWriteEncrypted
+    hPutStr fh enc
+  requestFileToWriteEncrypted :: IO Handle
+  requestFileToWriteEncrypted = do
+    putStrLn "please enter a path for the encrypted file to be saved at"
+    path <- getLine
+    fh <- try $ openFile path WriteMode
+    case fh of
+      Left e -> do
+        putStrLn $ "could not open a file handle for writing into " ++
+                   show path
+        putStrLn $ "because: " ++ show (e :: IOException)
+        requestFileToWriteEncrypted
+      Right fh -> return fh
+  requestFileToReadDecrypted :: IO Handle
+  requestFileToReadDecrypted = do
+    putStrLn $ "please enter a path for the decrypted file to be loaded from" ++
+               " for encryption"
+    path <- getLine
+    fh <- try $ openFile path ReadMode
+    case fh of
+      Left e -> do
+        putStrLn $ "could not open a file handle for reading from " ++
+                   show path
+        putStrLn $ "because: " ++ show (e :: IOException)
+        requestFileToReadDecrypted
+      Right fh -> return fh
+  alg = (CompPair intActions shiftUp)
+  dec = requestFileToReadDecrypted >>= hGetContents
+
+writeHandleFromUser = openFile "key.txt" WriteMode
+readHandleFromUser = openFile "key.txt" ReadMode
+
+
+  
 -- main :: IO ()
 -- main = do
 --   putStrLn "please enter encrypt or decrypt"
