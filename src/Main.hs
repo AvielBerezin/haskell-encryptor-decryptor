@@ -139,6 +139,27 @@ shiftXor :: Encryptor Int String String
 shiftXor = shift xorEncryptor
 
 
+mapGenerate :: (g k -> g' k) -> KeyActions g s l k dec enc ->
+               KeyActions g' s l k dec enc
+mapGenerate fromGen keyActions =
+  KeyActions (fromGen . generate $ keyActions)
+             (save keyActions)
+             (load keyActions)
+
+mapSave :: (s () -> s' ()) -> KeyActions g s l k dec enc ->
+           KeyActions g s' l k dec enc
+mapSave fromSave keyActions =
+  KeyActions (generate keyActions)
+             (fromSave . save keyActions)
+             (load keyActions)
+
+mapLoad :: (l k -> l' k) -> KeyActions g s l k dec enc ->
+           KeyActions g s l' k dec enc
+mapLoad fromLoad keyActions =
+  KeyActions (generate keyActions)
+             (save keyActions)
+             (fromLoad . load $ keyActions)
+
 gen :: (Random a, RandomGen g) => State g a
 gen = state random
 
@@ -208,26 +229,22 @@ readA val = do
   return val
 
 performEncryption :: (Monad m) =>
-                     (g k -> m k) ->
-                     (s () -> m ()) ->
-                     (l k -> m k) ->
                      (enc -> m ()) ->
                      (m dec) ->
-                     CompPair (KeyActions g s l) Encryptor k dec enc ->
+                     CompPair (KeyActions m m m) Encryptor k dec enc ->
                      m ()
-performEncryption fromGen fromSave fromLoad consumeEnc
-                  dec
-                  (CompPair ka encryptor) = do
-  key <- fromGen (generate ka)
+performEncryption consumeEnc dec (CompPair ka encryptor) = do
+  key <- generate ka
   dec <- dec
   consumeEnc . encrypt encryptor key $ dec
 
 main :: IO ()
-main = performEncryption
-         fromGen fromSave fromLoad writeEnc
-         dec
-         alg where
-  alg = (CompPair intActions shiftUp)
+main = performEncryption writeEnc dec alg where
+  alg = (CompPair (mapGenerate fromGen .
+                   mapSave fromSave .
+                   mapLoad fromLoad $
+                   intActions)
+          shiftUp)
   dec = requestFileToReadDecrypted >>= hGetContents
   enc = requestFileToReadEncrypted >>= hGetContents
 
