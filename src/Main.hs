@@ -24,13 +24,15 @@ data Encryptor k dec enc =
   Encryptor { encrypt :: k -> dec -> enc
             , decrypt :: k -> enc -> dec }
 
-data KeyActions g s l k dec enc =
+data KeyActions g s l k =
   KeyActions { generate :: g k
              , save :: k -> s ()
              , load :: l k }
 
-data CompPair kc1 kc2 k dec enc =
-  CompPair (kc1 k dec enc) (kc2 k dec enc)
+data Encryption g s l k dec enc =
+  Encryption
+    (KeyActions g s l k)
+    (Encryptor k dec enc)
 
 instance KeyComposed Encryptor where
   strongCompose encryptor1 encryptor2 =
@@ -48,45 +50,50 @@ instance KeyComposed Encryptor where
   repeat n encryptor =
     foldr compose (liftKey (const ()) identity) (replicate n encryptor)
 
-instance (Applicative g, Applicative s, Applicative l) =>
-         KeyComposed (KeyActions g s l) where
-  strongCompose ka1 ka2 =
+composeKeys :: (Applicative g, Applicative s, Applicative l) =>
+               KeyActions g s l k1 ->
+               KeyActions g s l k2 ->
+               KeyActions g s l (k1,k2)
+composeKeys ka1 ka2 =
     KeyActions
       ((,) <$> generate ka1 <*> generate ka2)
       (\(k1,k2) -> save ka1 k1 *> save ka2 k2)
       ((,) <$> load ka1 <*> load ka2)
-  compose ka _ =
-    KeyActions
-      (generate ka)
-      (save ka)
-      (load ka)
-  identity =
+
+repeatKeys :: (Applicative g, Applicative s, Applicative l) =>
+              Int -> KeyActions g s l k ->
+                    KeyActions g s l [k]
+repeatKeys n ka =
+  KeyActions
+    (replicateM n (generate ka))
+    (traverse_ (save ka))
+    (replicateM n (load ka))
+
+identityKeys :: (Applicative g, Applicative s, Applicative l) =>
+                KeyActions g s l ()
+identityKeys =
     KeyActions
       (pure ())
       (const $ pure ())
       (pure ())
-  strongRepeat n ka =
-    KeyActions
-      (replicateM n (generate ka))
-      (traverse_ (save ka))
-      (replicateM n (load ka))
-  repeat = flip const
 
-instance (KeyComposed a, KeyComposed b) => KeyComposed (CompPair a b) where
-  strongCompose (CompPair enc1 ka1) (CompPair enc2 ka2) =
-    CompPair (strongCompose enc1 enc2)
-             (strongCompose ka1 ka2)
-  compose (CompPair enc1 ka1)
-          (CompPair enc2 ka2) =
-    CompPair (compose enc1 enc2)
-             (compose ka1 ka2)
-  identity = CompPair identity identity
-  strongRepeat n (CompPair a b) =
-    CompPair (strongRepeat n a)
-             (strongRepeat n b)
-  repeat n (CompPair a b) =
-    CompPair (repeat n a)
-             (repeat n b)
+
+instance (Applicative g, Applicative s, Applicative l) =>
+         KeyComposed (Encryption g s l) where
+  strongCompose (Encryption ka1 enc1)
+                (Encryption ka2 enc2) =
+    Encryption (composeKeys ka1 ka2)
+               (strongCompose enc1 enc2)
+  compose (Encryption ka1 enc1)
+          (Encryption ka2 enc2) =
+    Encryption (ka1)
+               (compose enc1 enc2)
+  identity = Encryption identityKeys identity
+  strongRepeat n (Encryption ka enc) =
+    Encryption (repeatKeys n ka)
+               (strongRepeat n enc)
+  repeat n (Encryption ka enc) =
+    Encryption ka (repeat n enc)
 
 liftKey :: (k1 -> k2) -> Encryptor k2 a b -> Encryptor k1 a b
 liftKey k1ToK2 encryptor =
@@ -139,22 +146,22 @@ shiftXor :: Encryptor Int String String
 shiftXor = shift xorEncryptor
 
 
-mapGenerate :: (g k -> g' k) -> KeyActions g s l k dec enc ->
-               KeyActions g' s l k dec enc
+mapGenerate :: (g k -> g' k) -> KeyActions g s l k->
+               KeyActions g' s l k
 mapGenerate fromGen keyActions =
   KeyActions (fromGen . generate $ keyActions)
              (save keyActions)
              (load keyActions)
 
-mapSave :: (s () -> s' ()) -> KeyActions g s l k dec enc ->
-           KeyActions g s' l k dec enc
+mapSave :: (s () -> s' ()) -> KeyActions g s l k ->
+           KeyActions g s' l k
 mapSave fromSave keyActions =
   KeyActions (generate keyActions)
              (fromSave . save keyActions)
              (load keyActions)
 
-mapLoad :: (l k -> l' k) -> KeyActions g s l k dec enc ->
-           KeyActions g s l' k dec enc
+mapLoad :: (l k -> l' k) -> KeyActions g s l k ->
+           KeyActions g s l' k
 mapLoad fromLoad keyActions =
   KeyActions (generate keyActions)
              (save keyActions)
@@ -215,7 +222,6 @@ intActions :: KeyActions
                 (ReaderT Handle IO)
                 (StateT String (Either String))
                 Int
-                dec enc
 intActions =
   KeyActions
     gen
@@ -233,9 +239,9 @@ performEncryption :: (Monad m) =>
                      (dec -> m ()) ->
                      (m dec) ->
                      (m enc) ->
-                     CompPair (KeyActions m m m) Encryptor k dec enc ->
+                     Encryption m m m k dec enc ->
                      (m (), m ())
-performEncryption consumeEnc consumeDec dec enc (CompPair ka encryptor) =
+performEncryption consumeEnc consumeDec dec enc (Encryption ka encryptor) =
   (performEnc, performDec) where
   performEnc = do
     key <- generate ka
@@ -258,10 +264,10 @@ main = do
       main
   where
     (encryption,decryption) = performEncryption writeEnc writeDec dec enc alg
-    alg = (CompPair (mapGenerate fromGen .
-                     mapSave fromSave .
-                     mapLoad fromLoad $
-                     intActions)
+    alg = (Encryption (mapGenerate fromGen .
+                       mapSave fromSave .
+                       mapLoad fromLoad $
+                       intActions)
            shiftUp)
     dec = requestFileToReadDecrypted >>= hGetContents
     enc = requestFileToReadEncrypted >>= hGetContents
