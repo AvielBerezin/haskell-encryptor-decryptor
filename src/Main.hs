@@ -295,19 +295,7 @@ writeDec enc = do
   fh <- requestFileToWriteDecrypted
   hPutStr fh enc
 
-requestFileToWrite :: String -> IO Handle
-requestFileToWrite fileType = do
-  putStrLn $ "please enter a path for the " ++ fileType ++
-             " file to be saved at"
-  path <- getLine
-  fh <- try $ openFile path WriteMode
-  case fh of
-    Left e -> do
-      putStrLn $ "could not open a file handle for writing into " ++
-                 show path
-      putStrLn $ "because: " ++ show (e :: IOException)
-      requestFileToWriteEncrypted
-    Right fh -> return fh
+
 
 requestFileToWriteEncrypted :: IO Handle
 requestFileToWriteEncrypted = requestFileToWrite "encrypted"
@@ -315,49 +303,55 @@ requestFileToWriteEncrypted = requestFileToWrite "encrypted"
 requestFileToWriteDecrypted :: IO Handle
 requestFileToWriteDecrypted = requestFileToWrite "decrypted"
 
-
-
 requestFileToReadDecrypted :: IO Handle
-requestFileToReadDecrypted = requestFileToRead "decrypted"
+requestFileToReadDecrypted = requestFileToRead "decrypted" "encryption"
 
 requestFileToReadEncrypted :: IO Handle
-requestFileToReadEncrypted = requestFileToRead "encrypted"
+requestFileToReadEncrypted = requestFileToRead "encrypted" "decryption"
 
-requestFileToRead :: String -> IO Handle
-requestFileToRead fileType = do
-  putStrLn $ "please enter a path for the " ++ fileType ++
-             " file to be loaded from" ++
-             " for encryption"
-  path <- getLine
-  fh <- try $ openFile path ReadMode
-  case fh of
-    Left e -> do
-      putStrLn $ "could not open a file handle for reading from " ++
-                 show path
-      putStrLn $ "because: " ++ show (e :: IOException)
-      requestFileToReadDecrypted
-    Right fh -> return fh
+userKeyWriteHandle :: IO Handle
+userKeyWriteHandle =
+  persistantWriteFileRequest
+    (requestString "please enter a key path to write into")
 
-userKeyWriteHandle = do
-  putStrLn "please enter a key path to write into"
-  path <- getLine
-  openFile path WriteMode
+userKeyReadHandle :: IO Handle
+userKeyReadHandle =
+  persistantReadFileRequest
+    (requestString "please enter a key path to read from")
 
-userKeyReadHandle = do
-  putStrLn "please encter a key path to read from"
-  path <- getLine
-  openFile path ReadMode
+requestFileToRead :: String -> String -> IO Handle
+requestFileToRead fileType reason =
+  persistantReadFileRequest
+    (requestString $ "please enter a path for the " ++ fileType ++
+                     " file to be loaded from" ++
+                     " for " ++ reason)
 
+requestFileToWrite :: String -> IO Handle
+requestFileToWrite fileType =
+  persistantWriteFileRequest
+    (requestString $ "please enter a path for the " ++ fileType ++
+                     " file to be saved at")
 
-  
--- main :: IO ()
--- main = do
---   putStrLn "please enter encrypt or decrypt"
---   str <- getLine
---   let reader = (traverse readA "encrypt" *> pure encrypt) `mplus`
---                (traverse readA "decrypt" *> pure decrypt)
---   maybe
---     (putStrLn ("invalid option " + str) >> main)
---     (const $ putStrLn "good choise")
---     (runReaderT reader str)
---   return ()
+persistantReadFileRequest :: IO String -> IO Handle
+persistantReadFileRequest requestPath = do
+  path <- requestPath
+  catch (openFile path ReadMode)
+    (\e -> do
+        putStrLn $ "could not open a file handle for reading from " ++
+                   show path
+        putStrLn $ "because: " ++ show (e :: IOException)
+        requestFileToReadDecrypted)
+
+persistantWriteFileRequest :: IO String -> IO Handle
+persistantWriteFileRequest requestPath = do
+  path <- requestPath
+  catch (openFile path WriteMode)
+    (\e -> do
+        putStrLn $ "could not open a file handle for writing into " ++
+                   show path
+        putStrLn $ "because: " ++ show (e :: IOException)
+        requestFileToReadDecrypted)
+
+requestString :: String -> IO String
+requestString request =
+  putStrLn request >> getLine
