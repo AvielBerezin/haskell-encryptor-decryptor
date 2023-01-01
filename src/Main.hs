@@ -249,17 +249,15 @@ performEncryption consumeEnc consumeDec dec enc (CompPair ka encryptor) =
 
 main :: IO ()
 main = do
-  putStrLn "please enter operation (encryption|decryption)"
-  operation <- getLine
-  let (encryption,decryption) = performEncryption writeEnc writeDec dec enc alg
+  operation <- requestString "please enter operation (encryption|decryption)"
   case operation of
     "encryption" -> encryption
     "decryption" -> decryption
     _ -> do
       putStrLn $ "did not understand operation " ++ show operation
       main
-      
   where
+    (encryption,decryption) = performEncryption writeEnc writeDec dec enc alg
     alg = (CompPair (mapGenerate fromGen .
                      mapSave fromSave .
                      mapLoad fromLoad $
