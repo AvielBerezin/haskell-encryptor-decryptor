@@ -1,5 +1,6 @@
 module Encryption
   ( Encryption(..)
+  , keyActionMap
   ) where
 
 import KeyActions
@@ -33,4 +34,7 @@ instance (Applicative g, Applicative s, Applicative l) =>
     Encryption ka (power n enc)
 
 
-
+keyActionMap :: (KeyActions g s l k -> KeyActions g' s' l' k) ->
+                Encryption g s l k enc dec -> Encryption g' s' l' k enc dec
+keyActionMap keyActionsTrans (Encryption keyActions encryptor) =
+  Encryption (keyActionsTrans keyActions) encryptor
