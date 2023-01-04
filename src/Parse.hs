@@ -14,10 +14,6 @@ import Control.Monad.State
 import Data.Char
 import Control.Applicative
 
--- instance Monoid err => Monad (Either err) where
-  -- (Right x) >>= act = act x
-  -- (Left err) >>= act = 
-
 parseToken :: StateT [token] (Either String) token
 parseToken = StateT (\tokens ->
   case tokens of
