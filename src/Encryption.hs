@@ -12,7 +12,7 @@ data Encryption g s l k dec enc =
     (KeyActions g s l k)
     (Encryptor k dec enc)
 
-instance (Applicative g, Applicative s, Applicative l) =>
+instance (Applicative g, Monoid s, Applicative l) =>
          KeyComposed (Encryption g s l) where
   strongCompose (Encryption ka1 enc1)
                 (Encryption ka2 enc2) =

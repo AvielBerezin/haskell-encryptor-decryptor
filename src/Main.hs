@@ -1,31 +1,21 @@
+import Control.Applicative
+import Control.Exception
+
 import Control.Monad.Reader
 import Control.Monad.State
-import Control.Exception
+import Control.Monad.Trans.Cont
+
+import Data.Functor.Identity
+
 import System.Random
 import System.IO
+
 import Encryptor
 import KeyActions
 import Encryption
 import KeyComposed
-
-performEncryption :: (Monad m) =>
-                     (enc -> m ()) ->
-                     (dec -> m ()) ->
-                     (m dec) ->
-                     (m enc) ->
-                     Encryption m m m k dec enc ->
-                     (m (), m ())
-performEncryption consumeEnc consumeDec getDec getEnc (Encryption ka encryptor) =
-  (performEnc, performDec) where
-  performEnc = do
-    key <- generate ka
-    save ka key
-    dec <- getDec
-    consumeEnc . encrypt encryptor key $ dec
-  performDec = do
-    key <- load ka
-    enc <- getEnc
-    consumeDec . decrypt encryptor key $ enc
+import Parse
+import IO
 
 main :: IO ()
 main = do
@@ -37,85 +27,78 @@ main = do
       putStrLn $ "did not understand operation " ++ show operation
       main
   where
-    (encryption,decryption) =
-      performEncryption (persistantFileWrite "encrypted")
-                        (persistantFileWrite "decrypted")
-                        (persistantFileRead "decrypted" "encryption")
-                        (persistantFileRead "encrypted" "decryption")
-                        (keyActionMap (mapGenerate fromGen .
-                                       mapSave fromSave .
-                                       mapLoad fromLoad)
-                          alg)
-    alg = 
-      strongPower 7 (power 3 ((Encryption intActions shiftUp)
-                              `strongCompose`
-                              (Encryption intActions shiftMult))
-                     `compose`
-                     ((Encryption intActions shiftXor)
-                      `strongCompose`
-                      (Encryption intActions shiftMult)))
+    (Encryption keyActions encryptor) =
+      keyActionMap (mapGenerate fromGen
+                    . mapSave fromSave
+                    . mapLoad fromLoad)
+      $ strongPower 7 (power 3 ((Encryption intActions shiftUp)
+                                `strongCompose`
+                                (Encryption intActions shiftXor))
+                       `compose`
+                       ((Encryption intActions shiftXor)
+                        `strongCompose`
+                        (Encryption intActions shiftUp)))
+    encryption = do
+      let key = runIdentity . generate $ keyActions
+      save keyActions key
+      uncont (do dec <- persistantFileRead "decrypted" "encryption"
+                 persistantFileWrite "encrypted" . encrypt encryptor key $ dec)
+    decryption =
+      uncont (do
+                 key <- load keyActions
+                 enc <- persistantFileRead "encrypted" "decryption"
+                 persistantFileWrite "decrypted" . decrypt encryptor key $ enc)
+    
+uncont :: Applicative m =>  ContT r m r -> m r
+uncont = flip runContT pure
+
+intActions :: KeyActions
+                (State StdGen)
+                String
+                (StateT String (Either String))
+                Int
+intActions =
+  KeyActions
+    (state random)
+    (\k -> show k ++ "\n")
+    (many parseWhiteSpace *> parseInt <* many parseWhiteSpace)
 
 
-fromGen :: State StdGen a -> IO a
-fromGen gen = pure $ evalState gen (mkStdGen 137)
+fromGen :: State StdGen a -> Identity a
+fromGen gen = Identity $ evalState gen (mkStdGen 137)
 
-fromSave :: ReaderT Handle IO () -> IO ()
+fromSave :: String -> IO ()
 fromSave saving =
-  persistantWriteFileRequest
-    (requestString "please enter a key path to write into") >>=
-  runReaderT saving
+  runContT (persistantWriteFileRequest
+            (requestString "please enter a key path to write into")
+            saving)
+    return
 
-fromLoad :: StateT String (Either String) k -> IO k
+fromLoad :: StateT String (Either String) k -> ContT () IO k
 fromLoad loading = do
-  h <- persistantReadFileRequest
-         (requestString "please enter a key path to read from")
-  str <- hGetContents h
-  either failureToIO parsedToIO
-    (runStateT loading str)
-  where
-    parsedToIO (r, "") = return r
-    parsedToIO (r, remains) = fail ("got remains after key parse: " ++ show remains)
-    failureToIO msg = putStrLn ("error: " ++ msg) >> fromLoad loading
+      str <- persistantReadFileRequest
+             $ requestString "please enter a key path to read from"
+      case runStateT loading str of
+        Right (r, "") -> return r
+        Right (r, remains) ->
+          lift . fail $ "got remains after key parse: " ++ show remains
+        Left msg -> do
+          lift . putStrLn $ ("error: " ++ msg)
+          fromLoad loading
 
-persistantFileRead :: String -> String -> IO String
+persistantFileRead :: String -> String -> ContT () IO String
 persistantFileRead fileType reason =
   persistantReadFileRequest
-    (requestString $ "please enter a path for the " ++ fileType ++
-                     " file to be loaded from" ++
-                     " for " ++ reason) >>=
-  hGetContents
+    . requestString
+    $ "please enter a path for the " ++ fileType
+    ++ " file to be loaded from" ++ " for " ++ reason
 
-persistantFileWrite :: String -> String -> IO ()
-persistantFileWrite fileType enc = do
-  fh <- persistantWriteFileRequest
-        (requestString $ "please enter a path for the " ++ fileType ++
-                         " file to be saved at")
-  hPutStr fh enc
-
-persistantReadFileRequest :: IO String -> IO Handle
-persistantReadFileRequest =
-  persistantOpenFile
-    ReadMode
-    (\path -> "could not open a file handle for reading from " ++ show path)
-
-persistantWriteFileRequest :: IO String -> IO Handle
-persistantWriteFileRequest =
-  persistantOpenFile
-    WriteMode
-    (\path -> "could not open a file handle for writing into " ++ show path)
-
-persistantOpenFile :: IOMode ->
-                      (String -> String) ->
-                      IO String ->
-                      IO Handle
-persistantOpenFile ioMode errorSummaryFromPath requestPath = do
-  path <- requestPath
-  catch (openFile path ioMode)
-    (\e -> do
-        putStrLn $ errorSummaryFromPath path
-        putStrLn $ "because: " ++ show (e :: IOException)
-        persistantOpenFile ioMode errorSummaryFromPath requestPath)
-                      
+persistantFileWrite :: String -> String -> ContT () IO ()
+persistantFileWrite fileType =
+  persistantWriteFileRequest
+  . requestString
+  $ "please enter a path for the " ++ fileType
+  ++ " file to be saved at"
 
 requestString :: String -> IO String
 requestString request =
